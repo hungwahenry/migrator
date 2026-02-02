@@ -16,25 +16,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from telethon import TelegramClient
-from telethon.tl.functions.channels import InviteToChannelRequest
-from telethon.tl.types import User, Channel, Chat
-from telethon.errors import (
-    FloodWaitError,
-    PeerFloodError,
-    UserPrivacyRestrictedError,
-    UserAlreadyParticipantError,
-    UserIdInvalidError,
-    UserNotMutualContactError,
-    UserChannelsTooMuchError,
-    UsersTooMuchError,
-    ChatWriteForbiddenError,
-    ChatAdminRequiredError,
-    ChannelPrivateError,
-    UserKickedError,
-    UserBannedInChannelError,
-    InputUserDeactivatedError,
-)
+try:
+    from telethon import TelegramClient
+    from telethon.tl.functions.channels import InviteToChannelRequest
+    from telethon.tl.types import User, Channel, Chat
+    from telethon.errors import (
+        FloodWaitError,
+        PeerFloodError,
+        UserPrivacyRestrictedError,
+        UserAlreadyParticipantError,
+        UserIdInvalidError,
+        UserNotMutualContactError,
+        UserChannelsTooMuchError,
+        UsersTooMuchError,
+        ChatWriteForbiddenError,
+        ChatAdminRequiredError,
+        ChannelPrivateError,
+        UserKickedError,
+        UserBannedInChannelError,
+        InputUserDeactivatedError,
+    )
+    TELETHON_AVAILABLE = True
+except ImportError:
+    TELETHON_AVAILABLE = False
+    TelegramClient = None
+    User = None
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +52,17 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MockUser:
+    """Mock user for dry-run testing."""
+    id: int
+    first_name: str
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    bot: bool = False
+    deleted: bool = False
 
 
 @dataclass
@@ -161,13 +178,14 @@ class AccountPool:
 class TelegramMigrator:
     """Main migration orchestrator."""
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, dry_run: bool = False):
         self.config = self._load_config(config_path)
         self.rate_config = self.config.get('rate_limit', {})
         self.progress_file = Path(self.config.get('progress_file', 'migration_progress.json'))
         self.progress = self._load_progress()
         self.accounts: list[AccountConfig] = []
         self.account_pool: Optional[AccountPool] = None
+        self.dry_run = dry_run
 
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file."""
@@ -202,31 +220,42 @@ class TelegramMigrator:
                 session_name=acc_config['session_name']
             )
 
-            client = TelegramClient(
-                account.session_name,
-                account.api_id,
-                account.api_hash
-            )
+            if self.dry_run:
+                # In dry-run mode, simulate a connected client
+                account.client = "mock_client"  # Placeholder
+                logger.info(f"[DRY-RUN] Simulated login for {account.phone}")
+            else:
+                if not TELETHON_AVAILABLE:
+                    logger.error("Telethon is not installed. Run: pip install telethon")
+                    account.is_active = False
+                    self.accounts.append(account)
+                    continue
 
-            # Set flood sleep threshold
-            flood_threshold = self.rate_config.get('flood_wait_threshold', 300)
-            client.flood_sleep_threshold = flood_threshold
+                client = TelegramClient(
+                    account.session_name,
+                    account.api_id,
+                    account.api_hash
+                )
 
-            try:
-                await client.start(phone=account.phone)
-                account.client = client
-                me = await client.get_me()
-                logger.info(f"Logged in as {me.first_name} ({account.phone})")
-            except Exception as e:
-                logger.error(f"Failed to initialize account {account.phone}: {e}")
-                account.is_active = False
+                # Set flood sleep threshold
+                flood_threshold = self.rate_config.get('flood_wait_threshold', 300)
+                client.flood_sleep_threshold = flood_threshold
+
+                try:
+                    await client.start(phone=account.phone)
+                    account.client = client
+                    me = await client.get_me()
+                    logger.info(f"Logged in as {me.first_name} ({account.phone})")
+                except Exception as e:
+                    logger.error(f"Failed to initialize account {account.phone}: {e}")
+                    account.is_active = False
 
             self.accounts.append(account)
 
         self.account_pool = AccountPool(self.accounts, self.rate_config)
         logger.info(f"Initialized {self.account_pool.get_active_count()}/{len(self.accounts)} accounts")
 
-    async def fetch_source_members(self) -> list[User]:
+    async def fetch_source_members(self):
         """
         Fetch all members from the source group.
 
@@ -242,28 +271,42 @@ class TelegramMigrator:
         logger.info(f"Fetching members from {source_group}...")
 
         members = []
-        try:
-            # aggressive=True attempts to fetch more than 10k members
-            # but Telegram has increasingly restricted this
-            async for user in account.client.iter_participants(
-                source_group,
-                aggressive=True
-            ):
-                # Skip bots and deleted accounts
-                if user.bot or user.deleted:
-                    continue
-                # Skip already processed users
-                if user.id in self.progress.processed_user_ids:
-                    continue
-                members.append(user)
-        except Exception as e:
-            logger.error(f"Error fetching members: {e}")
-            raise
+
+        if self.dry_run:
+            # Generate mock users for testing
+            num_mock_users = self.config.get('dry_run_user_count', 10)
+            logger.info(f"[DRY-RUN] Generating {num_mock_users} mock users...")
+            for i in range(num_mock_users):
+                user_id = 1000000 + i
+                if user_id not in self.progress.processed_user_ids:
+                    members.append(MockUser(
+                        id=user_id,
+                        first_name=f"TestUser{i}",
+                        username=f"testuser{i}"
+                    ))
+        else:
+            try:
+                # aggressive=True attempts to fetch more than 10k members
+                # but Telegram has increasingly restricted this
+                async for user in account.client.iter_participants(
+                    source_group,
+                    aggressive=True
+                ):
+                    # Skip bots and deleted accounts
+                    if user.bot or user.deleted:
+                        continue
+                    # Skip already processed users
+                    if user.id in self.progress.processed_user_ids:
+                        continue
+                    members.append(user)
+            except Exception as e:
+                logger.error(f"Error fetching members: {e}")
+                raise
 
         logger.info(f"Found {len(members)} members to migrate (excluding already processed)")
         return members
 
-    async def add_user_to_destination(self, user: User) -> bool:
+    async def add_user_to_destination(self, user) -> bool:
         """
         Add a single user to the destination group.
         Returns True if successful, False otherwise.
@@ -274,6 +317,29 @@ class TelegramMigrator:
             return False
 
         destination = self.config['destination_group']
+
+        if self.dry_run:
+            # Simulate various outcomes for testing
+            outcome = random.random()
+            await asyncio.sleep(0.1)  # Small delay to simulate network
+
+            if outcome < 0.7:  # 70% success
+                self.progress.successful_adds += 1
+                self.account_pool.increment_add_count(account)
+                logger.info(f"[DRY-RUN] Successfully added {user.first_name} (ID: {user.id}) using {account.phone}")
+                return True
+            elif outcome < 0.8:  # 10% already member
+                self.progress.skipped_already_member += 1
+                logger.info(f"[DRY-RUN] User {user.first_name} (ID: {user.id}) already in destination group")
+                return True
+            elif outcome < 0.9:  # 10% privacy restricted
+                self.progress.skipped_privacy += 1
+                logger.info(f"[DRY-RUN] User {user.first_name} (ID: {user.id}) has privacy restrictions")
+                return False
+            else:  # 10% other failure
+                self.progress.failed_adds += 1
+                logger.warning(f"[DRY-RUN] Cannot add {user.first_name} (ID: {user.id}): Simulated error")
+                return False
 
         try:
             await account.client(InviteToChannelRequest(
@@ -376,9 +442,12 @@ class TelegramMigrator:
 
                 # Rate limiting delay
                 if i < len(members):  # Don't delay after last user
-                    delay_min = self.rate_config.get('delay_between_adds_min', 60)
-                    delay_max = self.rate_config.get('delay_between_adds_max', 120)
-                    delay = random.uniform(delay_min, delay_max)
+                    if self.dry_run:
+                        delay = 0.5  # Short delay for dry-run
+                    else:
+                        delay_min = self.rate_config.get('delay_between_adds_min', 60)
+                        delay_max = self.rate_config.get('delay_between_adds_max', 120)
+                        delay = random.uniform(delay_min, delay_max)
                     logger.info(f"Waiting {delay:.1f}s before next add...")
                     await asyncio.sleep(delay)
 
@@ -394,9 +463,10 @@ class TelegramMigrator:
 
         finally:
             # Disconnect all clients
-            for account in self.accounts:
-                if account.client:
-                    await account.client.disconnect()
+            if not self.dry_run:
+                for account in self.accounts:
+                    if account.client and hasattr(account.client, 'disconnect'):
+                        await account.client.disconnect()
             self._save_progress()
 
 
@@ -409,6 +479,8 @@ async def main():
                        help='Path to configuration file (default: config.json)')
     parser.add_argument('--reset-progress', action='store_true',
                        help='Reset migration progress and start fresh')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Simulate migration without connecting to Telegram')
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -423,7 +495,12 @@ async def main():
             progress_file.unlink()
             logger.info("Progress reset.")
 
-    migrator = TelegramMigrator(str(config_path))
+    if args.dry_run:
+        logger.info("=" * 50)
+        logger.info("DRY-RUN MODE - No actual Telegram operations")
+        logger.info("=" * 50)
+
+    migrator = TelegramMigrator(str(config_path), dry_run=args.dry_run)
     await migrator.run_migration()
 
 

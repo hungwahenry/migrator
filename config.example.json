@@ -22,5 +22,6 @@
     "cooldown_after_rotate_seconds": 900,
     "flood_wait_threshold": 300
   },
-  "progress_file": "migration_progress.json"
+  "progress_file": "migration_progress.json",
+  "dry_run_user_count": 10
 }
