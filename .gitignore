@@ -1,0 +1,29 @@
+# Credentials and config (contains sensitive data)
+config.json
+
+# Session files (contain auth tokens)
+*.session
+
+# Progress tracking
+migration_progress.json
+
+# Logs
+*.log
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
