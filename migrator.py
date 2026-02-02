@@ -27,7 +27,9 @@ from telethon.errors import (
     UserIdInvalidError,
     UserNotMutualContactError,
     UserChannelsTooMuchError,
+    UsersTooMuchError,
     ChatWriteForbiddenError,
+    ChatAdminRequiredError,
     ChannelPrivateError,
     UserKickedError,
     UserBannedInChannelError,
@@ -225,7 +227,13 @@ class TelegramMigrator:
         logger.info(f"Initialized {self.account_pool.get_active_count()}/{len(self.accounts)} accounts")
 
     async def fetch_source_members(self) -> list[User]:
-        """Fetch all members from the source group."""
+        """
+        Fetch all members from the source group.
+
+        Note: Telegram limits fetching to ~10,000 members max.
+        The aggressive=True parameter attempts workarounds but may not
+        work due to Telegram API restrictions.
+        """
         account = self.account_pool.get_current_account()
         if not account:
             raise RuntimeError("No active accounts available")
@@ -235,7 +243,12 @@ class TelegramMigrator:
 
         members = []
         try:
-            async for user in account.client.iter_participants(source_group):
+            # aggressive=True attempts to fetch more than 10k members
+            # but Telegram has increasingly restricted this
+            async for user in account.client.iter_participants(
+                source_group,
+                aggressive=True
+            ):
                 # Skip bots and deleted accounts
                 if user.bot or user.deleted:
                     continue
@@ -310,6 +323,14 @@ class TelegramMigrator:
 
         except (ChatWriteForbiddenError, ChannelPrivateError) as e:
             logger.error(f"Cannot access destination group: {type(e).__name__}")
+            raise  # This is a fatal error
+
+        except ChatAdminRequiredError:
+            logger.error("Admin privileges required in destination group")
+            raise  # This is a fatal error
+
+        except UsersTooMuchError:
+            logger.error("Destination group has reached maximum member capacity")
             raise  # This is a fatal error
 
         except Exception as e:
